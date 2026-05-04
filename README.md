@@ -22,6 +22,32 @@ Once per `executionInterval`, anyone can poke `executeYieldCapture()`:
 
 The 10% buffer protects against rounding/share-conversion drift; the auto-ratchet means the floor grows monotonically with the strategy.
 
+## Previewing yield
+
+Before executing, you can dry-run `previewYieldCapture()` to see expected amounts and whether execution would succeed. Because `balanceOfUnderlying` on the Moonwell mToken accrues interest as a side-effect, this function cannot be marked `view` — but it should still be called as a simulation (no gas, no state change), not as a transaction.
+
+```sh
+cast call <MODULE_ADDRESS> \
+  "previewYieldCapture()(uint256,uint256,uint256,uint256,uint256,uint256,bool)" \
+  --rpc-url $BASE_RPC_URL
+```
+
+The seven return values in order:
+
+| # | Name | Description |
+|---|---|---|
+| 1 | `strategyValue` | Total USDC value held in the Mamo strategy (raw 6-decimal units) |
+| 2 | `safeIdle` | USDC sitting idle in the Safe itself |
+| 3 | `totalYield` | `(strategyValue + safeIdle) - protectedPrincipal` |
+| 4 | `claimedYield` | 90% of `totalYield` — the amount that would be withdrawn |
+| 5 | `donationAmount` | 50% of `claimedYield` — sent to `donationRecipient` |
+| 6 | `devAmount` | 50% of `claimedYield` — sent to `devRecipient` |
+| 7 | `canExecute` | `true` if not paused, interval has elapsed, and `claimedYield >= minimumClaimAmount` |
+
+Divide any USDC amount by `1e6` for a human-readable value. If `canExecute` is `false`, check whether the module is paused, the interval hasn't elapsed yet, or yield is below the minimum threshold.
+
+**Do not send `previewYieldCapture` as a transaction** — return values are discarded by the EVM when called that way, and you will spend gas for nothing.
+
 ## Strategy value calculation
 
 Mirrors Mamo's internal `_getTotalBalance()` exactly:
