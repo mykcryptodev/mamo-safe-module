@@ -164,7 +164,55 @@ forge script script/DeployPawthereumMamoYieldModule.s.sol \
   --rpc-url $BASE_RPC_URL --broadcast --verify
 ```
 
-After deployment, the Safe must enable the module via a Safe transaction calling `enableModule(<deployed address>)`. This module cannot enable itself — that requires Safe-owner signatures.
+After deployment, the Safe must enable the module. This module cannot enable itself — that requires Safe-owner signatures.
+
+## Enabling and disabling the module
+
+Both operations are Safe transactions where the **target is the Safe itself** and the value is 0.
+
+### Enable
+
+Submit a Safe transaction calling `enableModule(address)` on the Safe, passing the deployed module address.
+
+**Via the Safe UI** (`app.safe.global`):
+
+1. New Transaction → Transaction Builder
+2. Set **To** to the Safe's own address
+3. Paste the ABI: `[{"inputs":[{"name":"module","type":"address"}],"name":"enableModule","outputs":[],"stateMutability":"nonpayable","type":"function"}]`
+4. Set `module` to `<MODULE_ADDRESS>`
+5. Collect required owner signatures and execute
+
+**Via cast (encode calldata for the Safe UI or API):**
+
+```sh
+cast calldata "enableModule(address)" <MODULE_ADDRESS>
+```
+
+Use the resulting hex as the transaction data field in the Safe UI or when proposing via the Safe Transaction Service API.
+
+### Disable
+
+The Safe uses a singly-linked list for modules. To remove a module you must supply the address of the module that points to it (`prevModule`). If the module was the first one enabled (or is the only module), `prevModule` is the sentinel `0x0000000000000000000000000000000000000001`.
+
+**Step 1 — find `prevModule`:**
+
+```sh
+# Returns (address[] modules, address next) — sentinel is 0x0000...0001
+cast call <SAFE_ADDRESS> \
+  "getModulesPaginated(address,uint256)(address[],address)" \
+  0x0000000000000000000000000000000000000001 10 \
+  --rpc-url $BASE_RPC_URL
+```
+
+Walk the returned array: the entry immediately **before** `<MODULE_ADDRESS>` in the list is `prevModule`. If `<MODULE_ADDRESS>` is first in the array, `prevModule` is the sentinel `0x0000000000000000000000000000000000000001`.
+
+**Step 2 — submit the Safe transaction:**
+
+```sh
+cast calldata "disableModule(address,address)" <PREV_MODULE> <MODULE_ADDRESS>
+```
+
+Submit this calldata as a Safe transaction where **To** is the Safe's own address. Collect required owner signatures and execute.
 
 ## Admin
 
