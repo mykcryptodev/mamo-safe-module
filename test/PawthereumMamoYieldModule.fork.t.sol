@@ -58,11 +58,18 @@ contract PawthereumMamoYieldModuleForkTest is Test {
     address internal strategy;
     PawthereumMamoYieldModule internal module;
 
-    address internal donation = makeAddr("donation");
-    address internal dev = makeAddr("dev");
+    address internal alice = makeAddr("alice");
+    address internal bob = makeAddr("bob");
     address internal poker = makeAddr("poker");
 
     bool internal forkReady;
+
+    function _defaultRecipients() internal view returns (PawthereumMamoYieldModule.Recipient[] memory) {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 4500});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 4500});
+        return r;
+    }
 
     function setUp() public {
         string memory rpc = vm.envOr("BASE_RPC_URL", string(""));
@@ -86,7 +93,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
 
         // Deploy the module with protectedPrincipal == amount we just deposited.
         module = new PawthereumMamoYieldModule(
-            address(safe), strategy, USDC, M_USDC, META_MORPHO_USDC_VAULT, donation, dev, SEED_DEPOSIT, INTERVAL, MIN_CLAIM
+            address(safe), strategy, USDC, M_USDC, META_MORPHO_USDC_VAULT, _defaultRecipients(), SEED_DEPOSIT, INTERVAL, MIN_CLAIM
         );
 
         forkReady = true;
@@ -115,34 +122,34 @@ contract PawthereumMamoYieldModuleForkTest is Test {
         assertGt(valueAfterAYear, SEED_DEPOSIT, "strategy should have accrued yield");
 
         uint256 expectedTotalYield = valueAfterAYear - SEED_DEPOSIT;
-        uint256 expectedClaim = (expectedTotalYield * 9_000) / 10_000;
+        // alice 4500 + bob 4500 = 9000 bps distributed; remainder compounds
+        uint256 expectedAlice = (expectedTotalYield * 4_500) / 10_000;
+        uint256 expectedBob = (expectedTotalYield * 4_500) / 10_000;
+        uint256 expectedDistributed = expectedAlice + expectedBob;
 
         vm.prank(poker);
         (
             uint256 strategyValueBefore,
             uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount
+            uint256 totalDistributed,
+            uint256 compoundedAmount
         ) = module.executeYieldCapture();
 
         assertEq(strategyValueBefore, valueAfterAYear);
         assertEq(totalYield, expectedTotalYield);
-        assertEq(claimedYield, expectedClaim);
-        assertEq(donationAmount + devAmount, claimedYield);
-        // 50/50 split: dev gets floor(claim * 5000 / 10000), donation gets the rest
-        assertApproxEqAbs(donationAmount, devAmount, 1);
+        assertEq(totalDistributed, expectedDistributed);
+        assertEq(compoundedAmount, expectedTotalYield - expectedDistributed);
 
-        assertEq(IUSDC(USDC).balanceOf(donation), donationAmount);
-        assertEq(IUSDC(USDC).balanceOf(dev), devAmount);
+        assertEq(IUSDC(USDC).balanceOf(alice), expectedAlice);
+        assertEq(IUSDC(USDC).balanceOf(bob), expectedBob);
 
         // principal invariant: strategy + safe idle >= original principal
         uint256 strategyAfter = module.getStrategyValue();
         uint256 safeIdleAfter = module.getSafeUSDC();
         assertGe(strategyAfter + safeIdleAfter, SEED_DEPOSIT, "principal preserved");
 
-        // auto-ratchet: protectedPrincipal grew by the unclaimed 10%
-        assertEq(module.protectedPrincipal(), SEED_DEPOSIT + (expectedTotalYield - expectedClaim));
+        // auto-ratchet: protectedPrincipal grew by the un-distributed remainder
+        assertEq(module.protectedPrincipal(), SEED_DEPOSIT + compoundedAmount);
     }
 
     function test_RevertWhenTooEarly() public onFork {
@@ -269,10 +276,17 @@ contract PawthereumMamoYieldModuleRealSafeForkTest is Test {
     address internal strategy;
     PawthereumMamoYieldModule internal module;
 
-    address internal donation = makeAddr("donation");
-    address internal dev = makeAddr("dev");
+    address internal alice = makeAddr("alice");
+    address internal bob = makeAddr("bob");
 
     bool internal forkReady;
+
+    function _defaultRecipients() internal view returns (PawthereumMamoYieldModule.Recipient[] memory) {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 4500});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 4500});
+        return r;
+    }
 
     function setUp() public {
         string memory rpc = vm.envOr("BASE_RPC_URL", string(""));
@@ -308,7 +322,7 @@ contract PawthereumMamoYieldModuleRealSafeForkTest is Test {
 
         // Deploy the module + enable it on the Safe.
         module = new PawthereumMamoYieldModule(
-            safe, strategy, USDC, M_USDC, META_MORPHO_USDC_VAULT, donation, dev, SEED_DEPOSIT, INTERVAL, MIN_CLAIM
+            safe, strategy, USDC, M_USDC, META_MORPHO_USDC_VAULT, _defaultRecipients(), SEED_DEPOSIT, INTERVAL, MIN_CLAIM
         );
         _execAsSafe(safe, abi.encodeWithSignature("enableModule(address)", address(module)));
 
@@ -351,20 +365,22 @@ contract PawthereumMamoYieldModuleRealSafeForkTest is Test {
         (
             uint256 strategyValueBefore,
             uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount
+            uint256 totalDistributed,
+            uint256 compoundedAmount
         ) = module.executeYieldCapture();
 
-        assertEq(strategyValueBefore, valueAfter);
-        assertEq(claimedYield, (totalYield * 9_000) / 10_000);
-        assertApproxEqAbs(donationAmount, devAmount, 1);
+        uint256 expectedAlice = (totalYield * 4_500) / 10_000;
+        uint256 expectedBob = (totalYield * 4_500) / 10_000;
 
-        assertEq(IUSDC(USDC).balanceOf(donation), donationAmount, "donation got its share");
-        assertEq(IUSDC(USDC).balanceOf(dev), devAmount, "dev got its share");
+        assertEq(strategyValueBefore, valueAfter);
+        assertEq(totalDistributed, expectedAlice + expectedBob);
+        assertEq(compoundedAmount, totalYield - totalDistributed);
+
+        assertEq(IUSDC(USDC).balanceOf(alice), expectedAlice, "alice got her share");
+        assertEq(IUSDC(USDC).balanceOf(bob), expectedBob, "bob got his share");
 
         // Principal preserved + auto-ratchet bumped the floor.
         assertGe(module.getStrategyValue() + IUSDC(USDC).balanceOf(safe), module.protectedPrincipal());
-        assertEq(module.protectedPrincipal(), SEED_DEPOSIT + (totalYield - claimedYield));
+        assertEq(module.protectedPrincipal(), SEED_DEPOSIT + compoundedAmount);
     }
 }

@@ -114,13 +114,21 @@ contract PawthereumMamoYieldModuleTest is Test {
     MockSafe internal safe;
     PawthereumMamoYieldModule internal module;
 
-    address internal donation = address(0xD0);
-    address internal dev = address(0xDE);
+    address internal alice = address(0xA1);
+    address internal bob = address(0xB0B);
     address internal poker = address(0xBEEF);
 
     uint256 internal constant PRINCIPAL = 1_000_000e6; // 1M USDC
     uint256 internal constant INTERVAL = 7 days;
     uint256 internal constant MIN_CLAIM = 1e6; // 1 USDC
+
+    // Default config: alice 45%, bob 45%, 10% compounds — matches the prior hardcoded behavior
+    function _defaultRecipients() internal view returns (PawthereumMamoYieldModule.Recipient[] memory) {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 4500});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 4500});
+        return r;
+    }
 
     function setUp() public {
         usdc = new MockERC20();
@@ -135,8 +143,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
@@ -156,8 +163,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
@@ -172,15 +178,17 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
         );
     }
 
-    function test_RevertOnZeroDonationRecipient() public {
+    function test_RevertOnZeroRecipientAddress() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](1);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: address(0), bps: 5000});
+
         vm.expectRevert(PawthereumMamoYieldModule.ZeroAddress.selector);
         new PawthereumMamoYieldModule(
             address(safe),
@@ -188,8 +196,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            address(0),
-            dev,
+            r,
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
@@ -202,12 +209,34 @@ contract PawthereumMamoYieldModuleTest is Test {
         assertEq(module.USDC(), address(usdc));
         assertEq(module.M_TOKEN(), address(mToken));
         assertEq(module.META_MORPHO_VAULT(), address(morpho));
-        assertEq(module.donationRecipient(), donation);
-        assertEq(module.devRecipient(), dev);
         assertEq(module.protectedPrincipal(), PRINCIPAL);
         assertEq(module.executionInterval(), INTERVAL);
         assertEq(module.minimumClaimAmount(), MIN_CLAIM);
         assertFalse(module.paused());
+        assertEq(module.recipientCount(), 2);
+
+        PawthereumMamoYieldModule.Recipient[] memory got = module.getRecipients();
+        assertEq(got.length, 2);
+        assertEq(got[0].addr, alice);
+        assertEq(got[0].bps, 4500);
+        assertEq(got[1].addr, bob);
+        assertEq(got[1].bps, 4500);
+    }
+
+    function test_ConstructorAllowsEmptyRecipients() public {
+        PawthereumMamoYieldModule.Recipient[] memory empty = new PawthereumMamoYieldModule.Recipient[](0);
+        PawthereumMamoYieldModule m = new PawthereumMamoYieldModule(
+            address(safe),
+            address(strategy),
+            address(usdc),
+            address(mToken),
+            address(morpho),
+            empty,
+            PRINCIPAL,
+            INTERVAL,
+            MIN_CLAIM
+        );
+        assertEq(m.recipientCount(), 0);
     }
 
     // ---------- getStrategyValue ----------
@@ -246,25 +275,96 @@ contract PawthereumMamoYieldModuleTest is Test {
         (
             uint256 strategyValueBefore,
             uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount
+            uint256 totalDistributed,
+            uint256 compoundedAmount
         ) = module.executeYieldCapture();
 
         assertEq(strategyValueBefore, strategyValue);
         assertEq(totalYield, 100e6);
-        assertEq(claimedYield, 90e6); // 90% of 100
-        assertEq(donationAmount, 45e6);
-        assertEq(devAmount, 45e6);
+        // alice 45% + bob 45% = 90 USDC distributed; 10% compounds
+        assertEq(totalDistributed, 90e6);
+        assertEq(compoundedAmount, 10e6);
 
-        assertEq(usdc.balanceOf(donation), 45e6);
-        assertEq(usdc.balanceOf(dev), 45e6);
+        assertEq(usdc.balanceOf(alice), 45e6);
+        assertEq(usdc.balanceOf(bob), 45e6);
         assertEq(usdc.balanceOf(address(safe)), 0); // Safe forwarded everything
-        assertEq(usdc.balanceOf(address(strategy)), strategyValue - claimedYield);
+        assertEq(usdc.balanceOf(address(strategy)), strategyValue - totalDistributed);
 
-        // auto-ratchet: principal grew by the unclaimed 10%
+        // auto-ratchet: principal grew by the un-distributed remainder
         assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6);
         assertEq(module.lastExecutionTimestamp(), block.timestamp);
+    }
+
+    function test_HappyPath_ThreeRecipients() public {
+        // 30/30/30 split, 10% compound
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](3);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 3000});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 3000});
+        address carol = address(0xCA40);
+        r[2] = PawthereumMamoYieldModule.Recipient({addr: carol, bps: 3000});
+
+        vm.prank(address(safe));
+        module.setRecipients(r);
+
+        _seedStrategyWithYield(PRINCIPAL + 1000e6); // 1000 USDC yield
+
+        vm.prank(poker);
+        (, uint256 totalYield, uint256 totalDistributed, uint256 compoundedAmount) =
+            module.executeYieldCapture();
+
+        assertEq(totalYield, 1000e6);
+        assertEq(totalDistributed, 900e6); // 30+30+30 = 90%
+        assertEq(compoundedAmount, 100e6);
+        assertEq(usdc.balanceOf(alice), 300e6);
+        assertEq(usdc.balanceOf(bob), 300e6);
+        assertEq(usdc.balanceOf(carol), 300e6);
+        assertEq(module.protectedPrincipal(), PRINCIPAL + 100e6);
+    }
+
+    function test_HappyPath_FullDistributionNoCompound() public {
+        // 50/50, sum == 10000, nothing compounds
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 5000});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 5000});
+
+        vm.prank(address(safe));
+        module.setRecipients(r);
+
+        _seedStrategyWithYield(PRINCIPAL + 100e6);
+
+        vm.prank(poker);
+        (, uint256 totalYield, uint256 totalDistributed, uint256 compoundedAmount) =
+            module.executeYieldCapture();
+
+        assertEq(totalYield, 100e6);
+        assertEq(totalDistributed, 100e6);
+        assertEq(compoundedAmount, 0);
+        assertEq(module.protectedPrincipal(), PRINCIPAL);
+    }
+
+    function test_HappyPath_EmptyRecipientsCompoundsEverything() public {
+        // No recipients = 100% compound. Min claim must be 0 since totalDistributed = 0.
+        vm.prank(address(safe));
+        module.setMinimumClaimAmount(0);
+
+        PawthereumMamoYieldModule.Recipient[] memory empty = new PawthereumMamoYieldModule.Recipient[](0);
+        vm.prank(address(safe));
+        module.setRecipients(empty);
+
+        _seedStrategyWithYield(PRINCIPAL + 100e6);
+
+        vm.prank(poker);
+        (, uint256 totalYield, uint256 totalDistributed, uint256 compoundedAmount) =
+            module.executeYieldCapture();
+
+        assertEq(totalYield, 100e6);
+        assertEq(totalDistributed, 0);
+        assertEq(compoundedAmount, 100e6);
+        assertEq(usdc.balanceOf(alice), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+        // strategy untouched
+        assertEq(usdc.balanceOf(address(strategy)), PRINCIPAL + 100e6);
+        assertEq(module.protectedPrincipal(), PRINCIPAL + 100e6);
     }
 
     function test_AutoRatchetCompoundsAcrossMultipleCycles() public {
@@ -280,12 +380,12 @@ contract PawthereumMamoYieldModuleTest is Test {
         vm.warp(block.timestamp + INTERVAL);
 
         vm.prank(poker);
-        (, uint256 totalYield2, uint256 claimedYield2,,) = module.executeYieldCapture();
+        (, uint256 totalYield2, uint256 totalDistributed2,) = module.executeYieldCapture();
 
         // strategy now sits at PRINCIPAL + 100 - 90 + 50 = PRINCIPAL + 60. Floor was bumped to PRINCIPAL + 10.
-        // so yield this cycle = 50, claim = 45.
+        // so yield this cycle = 50, distributed = 45.
         assertEq(totalYield2, 50e6);
-        assertEq(claimedYield2, 45e6);
+        assertEq(totalDistributed2, 45e6);
         assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6 + 5e6);
     }
 
@@ -295,14 +395,12 @@ contract PawthereumMamoYieldModuleTest is Test {
         usdc.mint(address(safe), 200e6);
 
         vm.prank(poker);
-        (,, uint256 claimedYield,,) = module.executeYieldCapture();
+        (,, uint256 totalDistributed,) = module.executeYieldCapture();
 
-        // total yield = (PRINCIPAL + 200) + 0 - PRINCIPAL = 200; claim = 180; dev/donation = 90 each
-        assertEq(claimedYield, 180e6);
-        // donation got 90, dev got 90; safe started with 200, ended with 200 - 180 + 0 (no withdraw needed since strategy idle is 1M)
-        // strategy had to give up 180 from its own idle pool
-        assertEq(usdc.balanceOf(donation), 90e6);
-        assertEq(usdc.balanceOf(dev), 90e6);
+        // total yield = (PRINCIPAL + 200) + 0 - PRINCIPAL = 200; distributed = 180
+        assertEq(totalDistributed, 180e6);
+        assertEq(usdc.balanceOf(alice), 90e6);
+        assertEq(usdc.balanceOf(bob), 90e6);
     }
 
     // ---------- Reverts ----------
@@ -337,8 +435,34 @@ contract PawthereumMamoYieldModuleTest is Test {
         module.executeYieldCapture();
     }
 
+    function test_RevertWhenAllRecipientAmountsRoundToZero() public {
+        // Griefing scenario: recipients configured + minimumClaimAmount = 0 + dust yield
+        // small enough that every (totalYield * bps) / 10000 floors to 0.
+        // Without the guard, anyone could consume the interval without paying recipients.
+        vm.prank(address(safe));
+        module.setMinimumClaimAmount(0);
+
+        // totalYield = 1 wei. (1 * 4500) / 10000 = 0 for both recipients.
+        _seedStrategyWithYield(PRINCIPAL + 1);
+
+        vm.prank(poker);
+        vm.expectRevert(PawthereumMamoYieldModule.BelowMinimum.selector);
+        module.executeYieldCapture();
+    }
+
+    function test_PreviewReportsCannotExecuteWhenAllAmountsRoundToZero() public {
+        vm.prank(address(safe));
+        module.setMinimumClaimAmount(0);
+        _seedStrategyWithYield(PRINCIPAL + 1);
+
+        PawthereumMamoYieldModule.Preview memory p = module.previewYieldCapture();
+        assertEq(p.totalYield, 1);
+        assertEq(p.totalDistributed, 0);
+        assertFalse(p.canExecute);
+    }
+
     function test_RevertWhenBelowMinimumClaim() public {
-        // tiny yield (1 USDC -> 0.9 USDC claim) but min is 1 USDC
+        // tiny yield (1 USDC -> 0.9 USDC distributed) but min is 1 USDC
         _seedStrategyWithYield(PRINCIPAL + 1e6);
 
         vm.prank(poker);
@@ -374,8 +498,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
@@ -392,34 +515,28 @@ contract PawthereumMamoYieldModuleTest is Test {
     function test_PreviewMatchesExecutionWhenExecutable() public {
         _seedStrategyWithYield(PRINCIPAL + 200e6);
 
-        (
-            uint256 pStrategyValue,
-            ,
-            uint256 pTotalYield,
-            uint256 pClaimedYield,
-            uint256 pDonationAmount,
-            uint256 pDevAmount,
-            bool canExecute
-        ) = module.previewYieldCapture();
+        PawthereumMamoYieldModule.Preview memory p = module.previewYieldCapture();
 
-        assertTrue(canExecute);
-        assertEq(pTotalYield, 200e6);
-        assertEq(pClaimedYield, 180e6);
+        assertTrue(p.canExecute);
+        assertEq(p.totalYield, 200e6);
+        assertEq(p.totalDistributed, 180e6);
+        assertEq(p.compoundedAmount, 20e6);
+        assertEq(p.amounts.length, 2);
+        assertEq(p.amounts[0], 90e6);
+        assertEq(p.amounts[1], 90e6);
 
         vm.prank(poker);
         (
             uint256 strategyValueBefore,
             uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount
+            uint256 totalDistributed,
+            uint256 compoundedAmount
         ) = module.executeYieldCapture();
 
-        assertEq(pStrategyValue, strategyValueBefore);
-        assertEq(pTotalYield, totalYield);
-        assertEq(pClaimedYield, claimedYield);
-        assertEq(pDonationAmount, donationAmount);
-        assertEq(pDevAmount, devAmount);
+        assertEq(p.strategyValue, strategyValueBefore);
+        assertEq(p.totalYield, totalYield);
+        assertEq(p.totalDistributed, totalDistributed);
+        assertEq(p.compoundedAmount, compoundedAmount);
     }
 
     function test_PreviewReportsCannotExecuteWhenPaused() public {
@@ -427,25 +544,154 @@ contract PawthereumMamoYieldModuleTest is Test {
         vm.prank(address(safe));
         module.pause();
 
-        (,,,,,, bool canExecute) = module.previewYieldCapture();
-        assertFalse(canExecute);
+        PawthereumMamoYieldModule.Preview memory p = module.previewYieldCapture();
+        assertFalse(p.canExecute);
     }
 
     function test_PreviewReportsCannotExecuteBelowMinimum() public {
         _seedStrategyWithYield(PRINCIPAL + 1e6);
-        (,,, uint256 claimedYield,,, bool canExecute) = module.previewYieldCapture();
-        assertEq(claimedYield, 0.9e6);
-        assertFalse(canExecute);
+        PawthereumMamoYieldModule.Preview memory p = module.previewYieldCapture();
+        assertEq(p.totalDistributed, 0.9e6);
+        assertFalse(p.canExecute);
     }
 
-    // ---------- Admin ----------
+    // ---------- Distribution getter ----------
+
+    function test_GetDistributionReturnsRecipientsAndCompoundBps() public view {
+        (PawthereumMamoYieldModule.Recipient[] memory recipients, uint16 compoundBps) =
+            module.getDistribution();
+        assertEq(recipients.length, 2);
+        assertEq(recipients[0].addr, alice);
+        assertEq(recipients[0].bps, 4500);
+        assertEq(recipients[1].addr, bob);
+        assertEq(recipients[1].bps, 4500);
+        assertEq(compoundBps, 1000); // 10000 - 4500 - 4500
+    }
+
+    function test_GetDistributionEmptyListIsAllCompound() public {
+        PawthereumMamoYieldModule.Recipient[] memory empty = new PawthereumMamoYieldModule.Recipient[](0);
+        vm.prank(address(safe));
+        module.setRecipients(empty);
+
+        (PawthereumMamoYieldModule.Recipient[] memory recipients, uint16 compoundBps) =
+            module.getDistribution();
+        assertEq(recipients.length, 0);
+        assertEq(compoundBps, 10000);
+    }
+
+    function test_GetRecipientByIndex() public view {
+        (address addr, uint16 bps) = module.getRecipient(0);
+        assertEq(addr, alice);
+        assertEq(bps, 4500);
+        (addr, bps) = module.getRecipient(1);
+        assertEq(addr, bob);
+        assertEq(bps, 4500);
+    }
+
+    // ---------- setRecipients validation ----------
+
+    function test_SetRecipientsRevertsWhenNotSafe() public {
+        vm.prank(poker);
+        vm.expectRevert(PawthereumMamoYieldModule.NotSafe.selector);
+        module.setRecipients(_defaultRecipients());
+    }
+
+    function test_SetRecipientsRevertsOnZeroAddress() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](1);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: address(0), bps: 5000});
+        vm.prank(address(safe));
+        vm.expectRevert(PawthereumMamoYieldModule.ZeroAddress.selector);
+        module.setRecipients(r);
+    }
+
+    function test_SetRecipientsRevertsOnZeroBps() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](1);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 0});
+        vm.prank(address(safe));
+        vm.expectRevert(PawthereumMamoYieldModule.ZeroBps.selector);
+        module.setRecipients(r);
+    }
+
+    function test_SetRecipientsRevertsOnBpsOverflow() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 6000});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 5000});
+        vm.prank(address(safe));
+        vm.expectRevert(PawthereumMamoYieldModule.BpsOverflow.selector);
+        module.setRecipients(r);
+    }
+
+    function test_SetRecipientsRevertsOnDuplicate() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 1000});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 1000});
+        vm.prank(address(safe));
+        vm.expectRevert(PawthereumMamoYieldModule.DuplicateRecipient.selector);
+        module.setRecipients(r);
+    }
+
+    function test_SetRecipientsRevertsWhenTooMany() public {
+        uint256 maxPlusOne = module.MAX_RECIPIENTS() + 1;
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](maxPlusOne);
+        for (uint256 i; i < maxPlusOne; ++i) {
+            r[i] = PawthereumMamoYieldModule.Recipient({addr: address(uint160(0x1000 + i)), bps: 1});
+        }
+        vm.prank(address(safe));
+        vm.expectRevert(PawthereumMamoYieldModule.TooManyRecipients.selector);
+        module.setRecipients(r);
+    }
+
+    function test_SetRecipientsAcceptsAtMax() public {
+        uint256 max = module.MAX_RECIPIENTS();
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](max);
+        for (uint256 i; i < max; ++i) {
+            r[i] = PawthereumMamoYieldModule.Recipient({addr: address(uint160(0x1000 + i)), bps: 1});
+        }
+        vm.prank(address(safe));
+        module.setRecipients(r);
+        assertEq(module.recipientCount(), max);
+    }
+
+    function test_SetRecipientsReplacesExistingList() public {
+        // replace the default 2-recipient list with a single recipient
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](1);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 7000});
+        vm.prank(address(safe));
+        module.setRecipients(r);
+
+        assertEq(module.recipientCount(), 1);
+        (address addr, uint16 bps) = module.getRecipient(0);
+        assertEq(addr, alice);
+        assertEq(bps, 7000);
+    }
+
+    function test_SetRecipientsEmitsEvent() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](1);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: alice, bps: 7000});
+
+        vm.expectEmit(false, false, false, true, address(module));
+        emit PawthereumMamoYieldModule.RecipientsUpdated(r, 3000);
+
+        vm.prank(address(safe));
+        module.setRecipients(r);
+    }
+
+    function test_ExecuteEmitsYieldDistributedPerRecipient() public {
+        _seedStrategyWithYield(PRINCIPAL + 100e6);
+
+        vm.expectEmit(true, false, false, true, address(module));
+        emit PawthereumMamoYieldModule.YieldDistributed(alice, 45e6);
+        vm.expectEmit(true, false, false, true, address(module));
+        emit PawthereumMamoYieldModule.YieldDistributed(bob, 45e6);
+
+        vm.prank(poker);
+        module.executeYieldCapture();
+    }
+
+    // ---------- Other admin ----------
 
     function test_AdminSettersRevertWhenNotSafe() public {
         vm.startPrank(poker);
-        vm.expectRevert(PawthereumMamoYieldModule.NotSafe.selector);
-        module.setDonationRecipient(address(0x99));
-        vm.expectRevert(PawthereumMamoYieldModule.NotSafe.selector);
-        module.setDevRecipient(address(0x99));
         vm.expectRevert(PawthereumMamoYieldModule.NotSafe.selector);
         module.setProtectedPrincipal(1);
         vm.expectRevert(PawthereumMamoYieldModule.NotSafe.selector);
@@ -462,12 +708,6 @@ contract PawthereumMamoYieldModuleTest is Test {
     function test_AdminSettersHappyPath() public {
         vm.startPrank(address(safe));
 
-        module.setDonationRecipient(address(0x111));
-        assertEq(module.donationRecipient(), address(0x111));
-
-        module.setDevRecipient(address(0x222));
-        assertEq(module.devRecipient(), address(0x222));
-
         module.setProtectedPrincipal(42);
         assertEq(module.protectedPrincipal(), 42);
 
@@ -482,15 +722,6 @@ contract PawthereumMamoYieldModuleTest is Test {
         module.unpause();
         assertFalse(module.paused());
 
-        vm.stopPrank();
-    }
-
-    function test_SetRecipientRevertsOnZeroAddress() public {
-        vm.startPrank(address(safe));
-        vm.expectRevert(PawthereumMamoYieldModule.ZeroAddress.selector);
-        module.setDonationRecipient(address(0));
-        vm.expectRevert(PawthereumMamoYieldModule.ZeroAddress.selector);
-        module.setDevRecipient(address(0));
         vm.stopPrank();
     }
 
@@ -513,8 +744,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
@@ -527,9 +757,9 @@ contract PawthereumMamoYieldModuleTest is Test {
     }
 
     function test_RevertWhenUSDCTransferReturnsFalseSilently() public {
-        // Wire the module to a token that lies ONLY when the Safe calls transfer (donation/dev
-        // path). Strategy-to-Safe transfer during withdraw must still succeed so we actually
-        // reach the donation/dev step -- that's the path we want to exercise.
+        // Wire the module to a token that lies ONLY when the Safe calls transfer (recipient
+        // payout path). Strategy-to-Safe transfer during withdraw must still succeed so we
+        // actually reach the recipient payout step -- that's the path we want to exercise.
         LyingUSDC lying = new LyingUSDC(address(safe));
         LyingTokenStrategy lyingStrat = new LyingTokenStrategy(lying);
 
@@ -539,18 +769,17 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(lying),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             INTERVAL,
             MIN_CLAIM
         );
         lying.mint(address(lyingStrat), PRINCIPAL + 100e6);
 
-        // expectCall asserts the donation `transfer` was *attempted* during execution (call
+        // expectCall asserts the alice `transfer` was *attempted* during execution (call
         // traces survive parent reverts). This is what proves the test exercises the
         // false-bool path rather than an earlier revert during withdraw.
-        vm.expectCall(address(lying), abi.encodeCall(LyingUSDC.transfer, (donation, 45e6)));
+        vm.expectCall(address(lying), abi.encodeCall(LyingUSDC.transfer, (alice, 45e6)));
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.SafeCallFailed.selector);
@@ -565,8 +794,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             address(usdc),
             address(mToken),
             address(morpho),
-            donation,
-            dev,
+            _defaultRecipients(),
             PRINCIPAL,
             0,
             MIN_CLAIM
@@ -612,7 +840,7 @@ contract RoundingShortStrategy {
 // USDC variant whose `transfer` returns false without moving balances -- but ONLY when
 // invoked by `lieToSender` (the Safe). Other callers get an honest transfer so the strategy
 // can actually deliver the claim into the Safe. This shape lets us exercise the false-bool
-// path on the donation/dev transfers without the test reverting earlier inside withdraw.
+// path on the recipient transfers without the test reverting earlier inside withdraw.
 contract LyingUSDC {
     mapping(address => uint256) public balanceOf;
     address public immutable lieToSender;

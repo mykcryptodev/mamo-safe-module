@@ -1,6 +1,6 @@
 # Pawthereum Mamo Yield Capture Safe Module
 
-A Gnosis Safe Module that autonomously skims yield from a Mamo USDC strategy owned by the Pawthereum Safe and splits it 50/50 between a donation wallet and a dev wallet — without ever touching principal.
+A Gnosis Safe Module that autonomously skims yield from a Mamo USDC strategy owned by the Pawthereum Safe and distributes it across a Safe-configured list of recipients, with any unallocated remainder auto-compounded back into protected principal — without ever touching principal.
 
 ## Invariant
 
@@ -15,38 +15,63 @@ If this invariant is ever violated the execution reverts. Principal is sacrosanc
 Once per `executionInterval`, anyone can poke `executeYieldCapture()`:
 
 1. Compute `totalYield = (strategy value + safe idle USDC) - protectedPrincipal`
-2. Withdraw `claimedYield = totalYield * 90%` from the Mamo strategy via the Safe
-3. Transfer 50% to `donationRecipient`, 50% to `devRecipient`
+2. For each configured recipient, compute `amount = totalYield * recipient.bps / 10_000`. Sum these as `totalDistributed`.
+3. Withdraw `totalDistributed` from the Mamo strategy via the Safe and transfer each recipient's share
 4. Verify the principal invariant
-5. Auto-ratchet: bump `protectedPrincipal` by the unclaimed 10% so the buffer compounds
+5. Auto-ratchet: bump `protectedPrincipal` by the un-distributed remainder (`totalYield - totalDistributed`) so the buffer compounds
 
-The 10% buffer protects against rounding/share-conversion drift; the auto-ratchet means the floor grows monotonically with the strategy.
+If recipient bps sum to less than 10,000, the remainder compounds. If they sum to exactly 10,000, nothing compounds and the entire yield is paid out. An empty recipients list means 100% compounds — useful as a "distributions paused, principal still grows" mode (set `minimumClaimAmount` to 0 in that case).
+
+The auto-ratchet means the floor grows monotonically with the strategy.
 
 ## Previewing yield
 
-Before executing, you can dry-run `previewYieldCapture()` to see expected amounts and whether execution would succeed. Because `balanceOfUnderlying` on the Moonwell mToken accrues interest as a side-effect, this function cannot be marked `view` — but it should still be called as a simulation (no gas, no state change), not as a transaction.
+Before executing, you can dry-run `previewYieldCapture()` to see expected amounts and whether execution would succeed. It returns a `Preview` struct. Because `balanceOfUnderlying` on the Moonwell mToken accrues interest as a side-effect, this function cannot be marked `view` — but it should still be called as a simulation (no gas, no state change), not as a transaction.
 
 ```sh
 cast call <MODULE_ADDRESS> \
-  "previewYieldCapture()(uint256,uint256,uint256,uint256,uint256,uint256,bool)" \
+  "previewYieldCapture()((uint256,uint256,uint256,uint256,uint256,uint256[],bool))" \
   --rpc-url $BASE_RPC_URL
 ```
 
-The seven return values in order:
+The seven struct fields in order:
 
 | # | Name | Description |
 |---|---|---|
 | 1 | `strategyValue` | Total USDC value held in the Mamo strategy (raw 6-decimal units) |
 | 2 | `safeIdle` | USDC sitting idle in the Safe itself |
 | 3 | `totalYield` | `(strategyValue + safeIdle) - protectedPrincipal` |
-| 4 | `claimedYield` | 90% of `totalYield` — the amount that would be withdrawn |
-| 5 | `donationAmount` | 50% of `claimedYield` — sent to `donationRecipient` |
-| 6 | `devAmount` | 50% of `claimedYield` — sent to `devRecipient` |
-| 7 | `canExecute` | `true` if not paused, interval has elapsed, and `claimedYield >= minimumClaimAmount` |
+| 4 | `totalDistributed` | Sum of per-recipient amounts that would be paid out |
+| 5 | `compoundedAmount` | `totalYield - totalDistributed` — bumped into `protectedPrincipal` |
+| 6 | `amounts` | Per-recipient amounts; `amounts[i]` corresponds to `getRecipients()[i]` |
+| 7 | `canExecute` | `true` if not paused, interval has elapsed, yield is non-zero, and `totalDistributed >= minimumClaimAmount` |
 
-Divide any USDC amount by `1e6` for a human-readable value. If `canExecute` is `false`, check whether the module is paused, the interval hasn't elapsed yet, or yield is below the minimum threshold.
+Divide any USDC amount by `1e6` for a human-readable value. If `canExecute` is `false`, check whether the module is paused, the interval hasn't elapsed yet, there's no yield to claim, or distributions are below the minimum threshold.
 
 **Do not send `previewYieldCapture` as a transaction** — return values are discarded by the EVM when called that way, and you will spend gas for nothing.
+
+## Configuring recipients
+
+The Safe owns the recipient list. Each entry is `(address addr, uint16 bps)` and the sum of bps across all entries must be ≤ 10,000. Whatever doesn't sum to 10,000 is the share that auto-compounds into `protectedPrincipal` each cycle.
+
+Read the current configuration:
+
+```sh
+# returns (recipients, compoundBps)
+cast call <MODULE_ADDRESS> \
+  "getDistribution()((address,uint16)[],uint16)" \
+  --rpc-url $BASE_RPC_URL
+```
+
+Update via a Safe transaction calling `setRecipients((address,uint16)[])`. Validation rules:
+
+- Each `addr` must be non-zero
+- Each `bps` must be > 0 (omit a recipient instead of giving it 0 bps)
+- No duplicate addresses
+- Sum of all `bps` ≤ 10,000
+- At most `MAX_RECIPIENTS` entries (16)
+
+An empty list is allowed and means "100% compound". `setRecipients` replaces the entire list — there are no add/remove primitives.
 
 ## Strategy value calculation
 
@@ -120,14 +145,16 @@ Copy `.env.example` to `.env` and fill in `BASE_RPC_URL` and `ETHERSCAN_API_KEY`
 Set the env vars in `.env`:
 
 ```
-SAFE=                    # the Pawthereum Gnosis Safe
-MAMO_STRATEGY=           # strategy created by the Mamo factory for the Safe
-DONATION_RECIPIENT=
-DEV_RECIPIENT=
-PROTECTED_PRINCIPAL=     # initial USDC floor (6 decimals)
-EXECUTION_INTERVAL=604800 # 7 days
-MIN_CLAIM_AMOUNT=1000000 # 1 USDC minimum to bother executing
+SAFE=                                # the Pawthereum Gnosis Safe
+MAMO_STRATEGY=                       # strategy created by the Mamo factory for the Safe
+RECIPIENT_ADDRESSES=0xAAA...,0xBBB... # comma-separated; same length as RECIPIENT_BPS
+RECIPIENT_BPS=4500,4500              # comma-separated; sum must be <= 10000
+PROTECTED_PRINCIPAL=                 # initial USDC floor (6 decimals)
+EXECUTION_INTERVAL=604800            # 7 days
+MIN_CLAIM_AMOUNT=1000000             # 1 USDC minimum to bother executing
 ```
+
+`RECIPIENT_ADDRESSES` and `RECIPIENT_BPS` may both be empty strings to deploy with no recipients (100% compound from day one).
 
 Then:
 
@@ -143,7 +170,7 @@ After deployment, the Safe must enable the module via a Safe transaction calling
 
 Only the Safe can call:
 
-- `setDonationRecipient(address)` / `setDevRecipient(address)`
+- `setRecipients((address,uint16)[])` (replaces the entire recipient list — see [Configuring recipients](#configuring-recipients))
 - `setProtectedPrincipal(uint256)` (manual override of the auto-ratcheted floor)
 - `setExecutionInterval(uint256)`
 - `setMinimumClaimAmount(uint256)`
@@ -161,4 +188,4 @@ The module **cannot**:
 - send funds to anyone other than the configured recipients
 - change strategy ownership
 
-All call-targets are immutable, all amounts are derived from the on-chain value calculation, and recipients are the only mutable destinations (Safe-controlled).
+All call-targets are immutable, all amounts are derived from the on-chain value calculation, and the recipient list is the only mutable destination set (Safe-controlled).

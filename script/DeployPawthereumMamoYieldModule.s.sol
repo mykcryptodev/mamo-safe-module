@@ -14,8 +14,6 @@ contract DeployPawthereumMamoYieldModule is Script {
         // execTransactionFromModuleReturnData, which the module depends on).
         address safe = vm.envAddress("SAFE");
         address mamoStrategy = vm.envAddress("MAMO_STRATEGY");
-        address donationRecipient = vm.envAddress("DONATION_RECIPIENT");
-        address devRecipient = vm.envAddress("DEV_RECIPIENT");
         uint256 protectedPrincipal = vm.envUint("PROTECTED_PRINCIPAL");
         uint256 executionInterval = vm.envUint("EXECUTION_INTERVAL");
         uint256 minimumClaimAmount = vm.envUint("MIN_CLAIM_AMOUNT");
@@ -24,6 +22,21 @@ contract DeployPawthereumMamoYieldModule is Script {
         address mToken = vm.envOr("M_TOKEN", BASE_M_USDC);
         address metaMorphoVault = vm.envOr("META_MORPHO_VAULT", BASE_META_MORPHO_USDC_VAULT);
 
+        // Parallel comma-separated lists. RECIPIENT_BPS values must each be > 0 and the
+        // sum must be <= 10_000; the remainder of 10_000 is auto-compounded into principal.
+        // Lengths must match. Pass empty strings for both to start with no recipients
+        // (100% compound).
+        address[] memory addrs = vm.envOr("RECIPIENT_ADDRESSES", ",", new address[](0));
+        uint256[] memory bps = vm.envOr("RECIPIENT_BPS", ",", new uint256[](0));
+        require(addrs.length == bps.length, "RECIPIENT_ADDRESSES / RECIPIENT_BPS length mismatch");
+
+        PawthereumMamoYieldModule.Recipient[] memory recipients =
+            new PawthereumMamoYieldModule.Recipient[](addrs.length);
+        for (uint256 i; i < addrs.length; ++i) {
+            require(bps[i] <= type(uint16).max, "bps too large for uint16");
+            recipients[i] = PawthereumMamoYieldModule.Recipient({addr: addrs[i], bps: uint16(bps[i])});
+        }
+
         vm.startBroadcast();
         module = new PawthereumMamoYieldModule(
             safe,
@@ -31,8 +44,7 @@ contract DeployPawthereumMamoYieldModule is Script {
             usdc,
             mToken,
             metaMorphoVault,
-            donationRecipient,
-            devRecipient,
+            recipients,
             protectedPrincipal,
             executionInterval,
             minimumClaimAmount

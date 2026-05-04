@@ -10,6 +10,21 @@ import {IERC20Minimal} from "./interfaces/IERC20Minimal.sol";
 import {ISafe} from "./interfaces/ISafe.sol";
 
 contract PawthereumMamoYieldModule is ReentrancyGuard {
+    struct Recipient {
+        address addr;
+        uint16 bps;
+    }
+
+    struct Preview {
+        uint256 strategyValue;
+        uint256 safeIdle;
+        uint256 totalYield;
+        uint256 totalDistributed;
+        uint256 compoundedAmount;
+        uint256[] amounts;
+        bool canExecute;
+    }
+
     address public immutable SAFE;
     address public immutable MAMO_STRATEGY;
     address public immutable USDC;
@@ -17,12 +32,9 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
     address public immutable META_MORPHO_VAULT;
 
     uint256 public constant BPS = 10_000;
-    uint256 public constant CLAIM_BPS = 9_000;
-    uint256 public constant DONATION_SPLIT_BPS = 5_000;
-    uint256 public constant DEV_SPLIT_BPS = 5_000;
+    uint256 public constant MAX_RECIPIENTS = 16;
 
-    address public donationRecipient;
-    address public devRecipient;
+    Recipient[] private _recipients;
     uint256 public protectedPrincipal;
     uint256 public lastExecutionTimestamp;
     uint256 public executionInterval;
@@ -30,6 +42,10 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
     bool public paused;
 
     error ZeroAddress();
+    error ZeroBps();
+    error BpsOverflow();
+    error DuplicateRecipient();
+    error TooManyRecipients();
     error NotSafe();
     error IsPaused();
     error TooEarly();
@@ -43,13 +59,12 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
     event YieldExecuted(
         uint256 strategyValueBefore,
         uint256 totalYield,
-        uint256 claimedYield,
-        uint256 donationAmount,
-        uint256 devAmount,
+        uint256 totalDistributed,
+        uint256 compoundedAmount,
         uint256 newProtectedPrincipal
     );
-    event DonationRecipientUpdated(address indexed previous, address indexed current);
-    event DevRecipientUpdated(address indexed previous, address indexed current);
+    event YieldDistributed(address indexed recipient, uint256 amount);
+    event RecipientsUpdated(Recipient[] recipients, uint16 compoundBps);
     event ProtectedPrincipalUpdated(uint256 previous, uint256 current);
     event ExecutionIntervalUpdated(uint256 previous, uint256 current);
     event MinimumClaimAmountUpdated(uint256 previous, uint256 current);
@@ -66,15 +81,14 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
         address usdc_,
         address mToken_,
         address metaMorphoVault_,
-        address donationRecipient_,
-        address devRecipient_,
+        Recipient[] memory initialRecipients,
         uint256 protectedPrincipal_,
         uint256 executionInterval_,
         uint256 minimumClaimAmount_
     ) {
         if (
             safe_ == address(0) || mamoStrategy_ == address(0) || usdc_ == address(0) || mToken_ == address(0)
-                || metaMorphoVault_ == address(0) || donationRecipient_ == address(0) || devRecipient_ == address(0)
+                || metaMorphoVault_ == address(0)
         ) {
             revert ZeroAddress();
         }
@@ -86,11 +100,11 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
         M_TOKEN = mToken_;
         META_MORPHO_VAULT = metaMorphoVault_;
 
-        donationRecipient = donationRecipient_;
-        devRecipient = devRecipient_;
         protectedPrincipal = protectedPrincipal_;
         executionInterval = executionInterval_;
         minimumClaimAmount = minimumClaimAmount_;
+
+        _setRecipients(initialRecipients);
     }
 
     function getStrategyValue() public returns (uint256) {
@@ -105,15 +119,36 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
         return IERC20Minimal(USDC).balanceOf(SAFE);
     }
 
+    function getRecipients() external view returns (Recipient[] memory) {
+        return _recipients;
+    }
+
+    function getRecipient(uint256 index) external view returns (address addr, uint16 bps) {
+        Recipient storage r = _recipients[index];
+        return (r.addr, r.bps);
+    }
+
+    function recipientCount() external view returns (uint256) {
+        return _recipients.length;
+    }
+
+    function getDistribution() external view returns (Recipient[] memory recipients, uint16 compoundBps) {
+        recipients = _recipients;
+        uint256 sumBps;
+        for (uint256 i; i < recipients.length; ++i) {
+            sumBps += recipients[i].bps;
+        }
+        compoundBps = uint16(BPS - sumBps);
+    }
+
     function executeYieldCapture()
         external
         nonReentrant
         returns (
             uint256 strategyValueBefore,
             uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount
+            uint256 totalDistributed,
+            uint256 compoundedAmount
         )
     {
         if (paused) revert IsPaused();
@@ -121,70 +156,72 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
 
         strategyValueBefore = getStrategyValue();
         uint256 safeIdleBefore = getSafeUSDC();
-        uint256 totalAssets = strategyValueBefore + safeIdleBefore;
 
-        if (totalAssets <= protectedPrincipal) revert NoYield();
-        totalYield = totalAssets - protectedPrincipal;
+        if (strategyValueBefore + safeIdleBefore <= protectedPrincipal) revert NoYield();
+        totalYield = strategyValueBefore + safeIdleBefore - protectedPrincipal;
 
-        claimedYield = (totalYield * CLAIM_BPS) / BPS;
-        if (claimedYield < minimumClaimAmount) revert BelowMinimum();
+        uint256[] memory amounts;
+        (amounts, totalDistributed) = _computeAmounts(totalYield);
 
-        devAmount = (claimedYield * DEV_SPLIT_BPS) / BPS;
-        donationAmount = claimedYield - devAmount;
+        if (_recipients.length > 0 && totalDistributed == 0) revert BelowMinimum();
+        if (totalDistributed < minimumClaimAmount) revert BelowMinimum();
 
-        _safeExec(MAMO_STRATEGY, abi.encodeCall(IMamoStrategy.withdraw, (claimedYield)));
+        if (totalDistributed > 0) {
+            _safeExec(MAMO_STRATEGY, abi.encodeCall(IMamoStrategy.withdraw, (totalDistributed)));
+            if (getSafeUSDC() < safeIdleBefore + totalDistributed) revert WithdrawFailed();
+            _payRecipients(amounts);
+        }
 
-        if (getSafeUSDC() < safeIdleBefore + claimedYield) revert WithdrawFailed();
-
-        _safeExec(USDC, abi.encodeCall(IERC20Minimal.transfer, (donationRecipient, donationAmount)));
-        _safeExec(USDC, abi.encodeCall(IERC20Minimal.transfer, (devRecipient, devAmount)));
-
-        uint256 newPrincipal = protectedPrincipal + (totalYield - claimedYield);
-        if (getStrategyValue() + getSafeUSDC() < newPrincipal) revert PrincipalViolation();
-        protectedPrincipal = newPrincipal;
+        compoundedAmount = totalYield - totalDistributed;
+        protectedPrincipal += compoundedAmount;
+        if (getStrategyValue() + getSafeUSDC() < protectedPrincipal) revert PrincipalViolation();
 
         lastExecutionTimestamp = block.timestamp;
 
-        emit YieldExecuted(strategyValueBefore, totalYield, claimedYield, donationAmount, devAmount, newPrincipal);
+        emit YieldExecuted(strategyValueBefore, totalYield, totalDistributed, compoundedAmount, protectedPrincipal);
     }
 
-    function previewYieldCapture()
-        external
-        returns (
-            uint256 strategyValue,
-            uint256 safeIdle,
-            uint256 totalYield,
-            uint256 claimedYield,
-            uint256 donationAmount,
-            uint256 devAmount,
-            bool canExecute
-        )
-    {
-        strategyValue = getStrategyValue();
-        safeIdle = getSafeUSDC();
-        uint256 totalAssets = strategyValue + safeIdle;
-
-        if (totalAssets > protectedPrincipal) {
-            totalYield = totalAssets - protectedPrincipal;
-            claimedYield = (totalYield * CLAIM_BPS) / BPS;
-            devAmount = (claimedYield * DEV_SPLIT_BPS) / BPS;
-            donationAmount = claimedYield - devAmount;
+    function previewYieldCapture() external returns (Preview memory p) {
+        p.strategyValue = getStrategyValue();
+        p.safeIdle = getSafeUSDC();
+        if (p.strategyValue + p.safeIdle > protectedPrincipal) {
+            p.totalYield = p.strategyValue + p.safeIdle - protectedPrincipal;
         }
-
-        canExecute = !paused && block.timestamp >= lastExecutionTimestamp + executionInterval
-            && claimedYield >= minimumClaimAmount;
+        (p.amounts, p.totalDistributed) = _computeAmounts(p.totalYield);
+        p.compoundedAmount = p.totalYield - p.totalDistributed;
+        p.canExecute = !paused && block.timestamp >= lastExecutionTimestamp + executionInterval
+            && p.totalYield > 0 && p.totalDistributed >= minimumClaimAmount
+            && (_recipients.length == 0 || p.totalDistributed > 0);
     }
 
-    function setDonationRecipient(address newRecipient) external onlySafe {
-        if (newRecipient == address(0)) revert ZeroAddress();
-        emit DonationRecipientUpdated(donationRecipient, newRecipient);
-        donationRecipient = newRecipient;
+    function _computeAmounts(uint256 totalYield)
+        internal
+        view
+        returns (uint256[] memory amounts, uint256 totalDistributed)
+    {
+        uint256 n = _recipients.length;
+        amounts = new uint256[](n);
+        for (uint256 i; i < n; ++i) {
+            uint256 amt = (totalYield * _recipients[i].bps) / BPS;
+            amounts[i] = amt;
+            totalDistributed += amt;
+        }
     }
 
-    function setDevRecipient(address newRecipient) external onlySafe {
-        if (newRecipient == address(0)) revert ZeroAddress();
-        emit DevRecipientUpdated(devRecipient, newRecipient);
-        devRecipient = newRecipient;
+    function _payRecipients(uint256[] memory amounts) internal {
+        uint256 n = amounts.length;
+        for (uint256 i; i < n; ++i) {
+            uint256 amt = amounts[i];
+            if (amt > 0) {
+                address to = _recipients[i].addr;
+                _safeExec(USDC, abi.encodeCall(IERC20Minimal.transfer, (to, amt)));
+                emit YieldDistributed(to, amt);
+            }
+        }
+    }
+
+    function setRecipients(Recipient[] calldata newRecipients) external onlySafe {
+        _setRecipients(newRecipients);
     }
 
     function setProtectedPrincipal(uint256 newPrincipal) external onlySafe {
@@ -211,6 +248,30 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
     function unpause() external onlySafe {
         paused = false;
         emit PausedSet(false);
+    }
+
+    function _setRecipients(Recipient[] memory newRecipients) internal {
+        uint256 n = newRecipients.length;
+        if (n > MAX_RECIPIENTS) revert TooManyRecipients();
+
+        uint256 sumBps;
+        for (uint256 i; i < n; ++i) {
+            Recipient memory r = newRecipients[i];
+            if (r.addr == address(0)) revert ZeroAddress();
+            if (r.bps == 0) revert ZeroBps();
+            for (uint256 j; j < i; ++j) {
+                if (newRecipients[j].addr == r.addr) revert DuplicateRecipient();
+            }
+            sumBps += r.bps;
+        }
+        if (sumBps > BPS) revert BpsOverflow();
+
+        delete _recipients;
+        for (uint256 i; i < n; ++i) {
+            _recipients.push(newRecipients[i]);
+        }
+
+        emit RecipientsUpdated(newRecipients, uint16(BPS - sumBps));
     }
 
     function _safeExec(address to, bytes memory data) internal {
