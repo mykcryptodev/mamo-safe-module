@@ -12,7 +12,7 @@ If this invariant is ever violated the execution reverts. Principal is sacrosanc
 
 ## How it works
 
-Once per `executionInterval` (default 7 days), anyone can poke `executeWeeklyYieldCapture()`:
+Once per `executionInterval`, anyone can poke `executeYieldCapture()`:
 
 1. Compute `totalYield = (strategy value + safe idle USDC) - protectedPrincipal`
 2. Withdraw `claimedYield = totalYield * 90%` from the Mamo strategy via the Safe
