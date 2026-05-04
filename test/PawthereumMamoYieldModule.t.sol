@@ -249,7 +249,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             uint256 claimedYield,
             uint256 donationAmount,
             uint256 devAmount
-        ) = module.executeWeeklyYieldCapture();
+        ) = module.executeYieldCapture();
 
         assertEq(strategyValueBefore, strategyValue);
         assertEq(totalYield, 100e6);
@@ -272,7 +272,7 @@ contract PawthereumMamoYieldModuleTest is Test {
         _seedStrategyWithYield(PRINCIPAL + 100e6);
 
         vm.prank(poker);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
         assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6);
 
         // second cycle: simulate 50 USDC of new yield arriving (idle USDC grew further)
@@ -280,7 +280,7 @@ contract PawthereumMamoYieldModuleTest is Test {
         vm.warp(block.timestamp + INTERVAL);
 
         vm.prank(poker);
-        (, uint256 totalYield2, uint256 claimedYield2,,) = module.executeWeeklyYieldCapture();
+        (, uint256 totalYield2, uint256 claimedYield2,,) = module.executeYieldCapture();
 
         // strategy now sits at PRINCIPAL + 100 - 90 + 50 = PRINCIPAL + 60. Floor was bumped to PRINCIPAL + 10.
         // so yield this cycle = 50, claim = 45.
@@ -295,7 +295,7 @@ contract PawthereumMamoYieldModuleTest is Test {
         usdc.mint(address(safe), 200e6);
 
         vm.prank(poker);
-        (,, uint256 claimedYield,,) = module.executeWeeklyYieldCapture();
+        (,, uint256 claimedYield,,) = module.executeYieldCapture();
 
         // total yield = (PRINCIPAL + 200) + 0 - PRINCIPAL = 200; claim = 180; dev/donation = 90 each
         assertEq(claimedYield, 180e6);
@@ -314,19 +314,19 @@ contract PawthereumMamoYieldModuleTest is Test {
         _seedStrategyWithYield(PRINCIPAL + 100e6);
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.IsPaused.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenTooEarly() public {
         _seedStrategyWithYield(PRINCIPAL + 100e6);
 
         vm.prank(poker);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
 
         // immediately try again -- should revert
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.TooEarly.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenNoYield() public {
@@ -334,7 +334,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.NoYield.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenBelowMinimumClaim() public {
@@ -343,7 +343,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.BelowMinimum.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenWithdrawShortDelivers() public {
@@ -352,7 +352,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.WithdrawFailed.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenSafeCallFails() public {
@@ -361,7 +361,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.SafeCallFailed.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenPrincipalViolationDetected() public {
@@ -384,7 +384,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.PrincipalViolation.selector);
-        m2.executeWeeklyYieldCapture();
+        m2.executeYieldCapture();
     }
 
     // ---------- Preview ----------
@@ -413,7 +413,7 @@ contract PawthereumMamoYieldModuleTest is Test {
             uint256 claimedYield,
             uint256 donationAmount,
             uint256 devAmount
-        ) = module.executeWeeklyYieldCapture();
+        ) = module.executeYieldCapture();
 
         assertEq(pStrategyValue, strategyValueBefore);
         assertEq(pTotalYield, totalYield);
@@ -523,7 +523,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.PrincipalViolation.selector);
-        m2.executeWeeklyYieldCapture();
+        m2.executeYieldCapture();
     }
 
     function test_RevertWhenUSDCTransferReturnsFalseSilently() public {
@@ -554,7 +554,7 @@ contract PawthereumMamoYieldModuleTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.SafeCallFailed.selector);
-        m2.executeWeeklyYieldCapture();
+        m2.executeYieldCapture();
     }
 
     function test_RevertOnZeroExecutionIntervalConstructor() public {

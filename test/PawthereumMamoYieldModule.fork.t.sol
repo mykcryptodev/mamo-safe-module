@@ -124,7 +124,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
             uint256 claimedYield,
             uint256 donationAmount,
             uint256 devAmount
-        ) = module.executeWeeklyYieldCapture();
+        ) = module.executeYieldCapture();
 
         assertEq(strategyValueBefore, valueAfterAYear);
         assertEq(totalYield, expectedTotalYield);
@@ -151,7 +151,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
         vm.roll(block.number + (30 days / 2));
 
         vm.prank(poker);
-        try module.executeWeeklyYieldCapture() {}
+        try module.executeYieldCapture() {}
         catch {
             // If 30 days didn't accrue enough to clear MIN_CLAIM, skip the rest.
             return;
@@ -159,7 +159,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.TooEarly.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenPaused() public onFork {
@@ -171,7 +171,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
 
         vm.prank(poker);
         vm.expectRevert(PawthereumMamoYieldModule.IsPaused.selector);
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_RevertWhenYieldZero() public onFork {
@@ -179,7 +179,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
         // (or minute amounts well below MIN_CLAIM). NoYield or BelowMinimum is acceptable.
         vm.prank(poker);
         vm.expectRevert();
-        module.executeWeeklyYieldCapture();
+        module.executeYieldCapture();
     }
 
     function test_AdminFunctionsRequireSafe() public onFork {
@@ -204,7 +204,7 @@ contract PawthereumMamoYieldModuleForkTest is Test {
             uint256 floor = module.protectedPrincipal();
 
             vm.prank(poker);
-            try module.executeWeeklyYieldCapture() {
+            try module.executeYieldCapture() {
                 assertGe(module.getStrategyValue() + module.getSafeUSDC(), floor, "principal invariant broken");
                 assertGe(module.protectedPrincipal(), floor, "ratchet must be monotonic");
             } catch {
@@ -354,7 +354,7 @@ contract PawthereumMamoYieldModuleRealSafeForkTest is Test {
             uint256 claimedYield,
             uint256 donationAmount,
             uint256 devAmount
-        ) = module.executeWeeklyYieldCapture();
+        ) = module.executeYieldCapture();
 
         assertEq(strategyValueBefore, valueAfter);
         assertEq(claimedYield, (totalYield * 9_000) / 10_000);

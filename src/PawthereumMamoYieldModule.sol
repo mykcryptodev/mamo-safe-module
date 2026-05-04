@@ -105,7 +105,7 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
         return IERC20Minimal(USDC).balanceOf(SAFE);
     }
 
-    function executeWeeklyYieldCapture()
+    function executeYieldCapture()
         external
         nonReentrant
         returns (
