@@ -403,6 +403,24 @@ contract PawthereumMamoYieldModuleTest is Test {
         assertEq(usdc.balanceOf(bob), 0);
     }
 
+    function test_SafeTreasuryUSDCIsNotDistributedAsYield() public {
+        uint256 treasuryBalance = 200e6;
+        _seedStrategyWithYield(PRINCIPAL + 100e6);
+        usdc.mint(address(safe), treasuryBalance);
+
+        vm.prank(poker);
+        (, uint256 totalYield, uint256 totalDistributed, uint256 compoundedAmount) =
+            module.executeYieldCapture();
+
+        assertEq(totalYield, 100e6);
+        assertEq(totalDistributed, 90e6);
+        assertEq(compoundedAmount, 10e6);
+        assertEq(usdc.balanceOf(address(safe)), treasuryBalance);
+        assertEq(usdc.balanceOf(alice), 45e6);
+        assertEq(usdc.balanceOf(bob), 45e6);
+        assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6);
+    }
+
     function test_SafeRecipientShareIsNotRedistributedWithoutNewStrategyYield() public {
         PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
         r[0] = PawthereumMamoYieldModule.Recipient({addr: address(safe), bps: 4500});
