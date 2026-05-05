@@ -14,13 +14,15 @@ If this invariant is ever violated the execution reverts. Principal is sacrosanc
 
 Once per `executionInterval`, anyone can poke `executeYieldCapture()`:
 
-1. Compute `totalYield = (strategy value + safe idle USDC) - protectedPrincipal`
+1. Compute `totalYield = strategy value - protectedPrincipal`
 2. For each configured recipient, compute `amount = totalYield * recipient.bps / 10_000`. Sum these as `totalDistributed`.
 3. Withdraw `totalDistributed` from the Mamo strategy via the Safe and transfer each recipient's share
 4. Verify the principal invariant
 5. Auto-ratchet: bump `protectedPrincipal` by the un-distributed remainder (`totalYield - totalDistributed`) so the buffer compounds
 
 If recipient bps sum to less than 10,000, the remainder compounds. If they sum to exactly 10,000, nothing compounds and the entire yield is paid out. An empty recipients list means 100% compounds — useful as a "distributions paused, principal still grows" mode (set `minimumClaimAmount` to 0 in that case).
+
+Only value held by the Mamo strategy creates claimable yield. Raw USDC held directly by the Safe is still counted in the final principal-protection invariant, but it is not treated as yield and will not be redistributed by future claims. This allows the Safe itself to be a recipient without its retained USDC being claimed again in later cycles.
 
 The auto-ratchet means the floor grows monotonically with the strategy.
 
@@ -40,7 +42,7 @@ The seven struct fields in order:
 |---|---|---|
 | 1 | `strategyValue` | Total USDC value held in the Mamo strategy (raw 6-decimal units) |
 | 2 | `safeIdle` | USDC sitting idle in the Safe itself |
-| 3 | `totalYield` | `(strategyValue + safeIdle) - protectedPrincipal` |
+| 3 | `totalYield` | `strategyValue - protectedPrincipal`; Safe idle USDC is reported separately but does not create claimable yield |
 | 4 | `totalDistributed` | Sum of per-recipient amounts that would be paid out |
 | 5 | `compoundedAmount` | `totalYield - totalDistributed` — bumped into `protectedPrincipal` |
 | 6 | `amounts` | Per-recipient amounts; `amounts[i]` corresponds to `getRecipients()[i]` |
@@ -84,6 +86,22 @@ morphoVault.convertToAssets(morphoVault.balanceOf(strategy))
 ```
 
 Verified against `moonwell-fi/mamo-contracts` source — see `src/PawthereumMamoYieldModule.sol::getStrategyValue`.
+
+## Safe-held USDC
+
+The Safe may hold raw USDC directly, including because the Safe itself is configured as a recipient. That USDC is not part of the yield calculation:
+
+```solidity
+totalYield = strategyValue - protectedPrincipal
+```
+
+It still counts toward the post-execution safety check:
+
+```solidity
+strategyValueAfter + safeIdleUSDC >= protectedPrincipal
+```
+
+This distinction keeps the protected-principal invariant conservative without treating treasury USDC held by the Safe as recurring distributable yield.
 
 ## Safe version requirement
 
@@ -232,7 +250,7 @@ The module **cannot**:
 - accept external calldata
 - delegatecall
 - approve tokens
-- pull funds out of the Mamo strategy beyond the computed yield
+- pull funds out of the Mamo strategy beyond the computed strategy yield
 - send funds to anyone other than the configured recipients
 - change strategy ownership
 

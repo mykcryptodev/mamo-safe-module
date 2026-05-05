@@ -157,8 +157,8 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
         strategyValueBefore = getStrategyValue();
         uint256 safeIdleBefore = getSafeUSDC();
 
-        if (strategyValueBefore + safeIdleBefore <= protectedPrincipal) revert NoYield();
-        totalYield = strategyValueBefore + safeIdleBefore - protectedPrincipal;
+        if (strategyValueBefore <= protectedPrincipal) revert NoYield();
+        totalYield = strategyValueBefore - protectedPrincipal;
 
         uint256[] memory amounts;
         (amounts, totalDistributed) = _computeAmounts(totalYield);
@@ -184,8 +184,8 @@ contract PawthereumMamoYieldModule is ReentrancyGuard {
     function previewYieldCapture() external returns (Preview memory p) {
         p.strategyValue = getStrategyValue();
         p.safeIdle = getSafeUSDC();
-        if (p.strategyValue + p.safeIdle > protectedPrincipal) {
-            p.totalYield = p.strategyValue + p.safeIdle - protectedPrincipal;
+        if (p.strategyValue > protectedPrincipal) {
+            p.totalYield = p.strategyValue - protectedPrincipal;
         }
         (p.amounts, p.totalDistributed) = _computeAmounts(p.totalYield);
         p.compoundedAmount = p.totalYield - p.totalDistributed;

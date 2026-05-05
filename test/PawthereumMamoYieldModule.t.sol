@@ -389,18 +389,45 @@ contract PawthereumMamoYieldModuleTest is Test {
         assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6 + 5e6);
     }
 
-    function test_HandlesSafeIdleUSDCInExcessOfPrincipal() public {
-        // strategy at exactly principal; safe holds extra USDC that should count as yield
+    function test_IgnoresSafeIdleUSDCForYieldCalculation() public {
+        // strategy at exactly principal; safe holds extra USDC that should not count as yield
         _seedStrategyWithYield(PRINCIPAL);
         usdc.mint(address(safe), 200e6);
 
         vm.prank(poker);
-        (,, uint256 totalDistributed,) = module.executeYieldCapture();
+        vm.expectRevert(PawthereumMamoYieldModule.NoYield.selector);
+        module.executeYieldCapture();
 
-        // total yield = (PRINCIPAL + 200) + 0 - PRINCIPAL = 200; distributed = 180
-        assertEq(totalDistributed, 180e6);
-        assertEq(usdc.balanceOf(alice), 90e6);
-        assertEq(usdc.balanceOf(bob), 90e6);
+        assertEq(usdc.balanceOf(address(safe)), 200e6);
+        assertEq(usdc.balanceOf(alice), 0);
+        assertEq(usdc.balanceOf(bob), 0);
+    }
+
+    function test_SafeRecipientShareIsNotRedistributedWithoutNewStrategyYield() public {
+        PawthereumMamoYieldModule.Recipient[] memory r = new PawthereumMamoYieldModule.Recipient[](2);
+        r[0] = PawthereumMamoYieldModule.Recipient({addr: address(safe), bps: 4500});
+        r[1] = PawthereumMamoYieldModule.Recipient({addr: bob, bps: 4500});
+
+        vm.prank(address(safe));
+        module.setRecipients(r);
+
+        _seedStrategyWithYield(PRINCIPAL + 100e6);
+
+        vm.prank(poker);
+        module.executeYieldCapture();
+
+        assertEq(usdc.balanceOf(address(safe)), 45e6);
+        assertEq(usdc.balanceOf(bob), 45e6);
+        assertEq(module.protectedPrincipal(), PRINCIPAL + 10e6);
+
+        vm.warp(block.timestamp + INTERVAL);
+
+        vm.prank(poker);
+        vm.expectRevert(PawthereumMamoYieldModule.NoYield.selector);
+        module.executeYieldCapture();
+
+        assertEq(usdc.balanceOf(address(safe)), 45e6);
+        assertEq(usdc.balanceOf(bob), 45e6);
     }
 
     // ---------- Reverts ----------
